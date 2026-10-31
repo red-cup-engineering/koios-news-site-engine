@@ -53,15 +53,36 @@ test('cleanup-only failure preserves successful publication evidence without cla
  assert.equal(events.at(-1).effects.production,'publicly-verified');
 });
 
-for(const change of ['missing','mismatched','unaccepted'])test(`a ${change} receipt never earns verified effect diagnostics`,async()=>{
+for(const phase of ['preview','production'])for(const change of ['missing','mismatched','unaccepted','wrong-kind','unbound'])
+ test(`${phase} ${change} receipt refuses release success and preserves unresolved effect custody`,async()=>{
+  const events=[];let executions=0,cleanups=0;
+  await assert.rejects(observeRelease(async({stage,bindCandidate,deferCleanup})=>{
+   if(change!=='unbound')bindCandidate(sha);
+   deferCleanup(()=>{cleanups++;});
+   const value=receipt(phase);
+   if(change==='mismatched')value.probe.manifestSha256='c'.repeat(64);
+   if(change==='unaccepted')value.probe.accepted=false;
+   if(change==='wrong-kind')value.kind='unrecognized-provider-reply';
+   await stage(phase+'-deploy-verify',()=>{executions++;return change==='missing'?undefined:value;});
+  },options(events)),{message:'Release phase returned no exact accepted public receipt'});
+  assert.equal(executions,1,'effect may not be replayed after an ambiguous provider result');
+  assert.equal(cleanups,1,'the original cleanup path remains available');
+  assert.equal(events.at(-1).status,'failed');
+  assert.equal(events.at(-1).phase,phase+'-deploy-verify');
+  assert.equal(events.at(-1).effects[phase],'attempted-unreconciled');
+  assert.equal(events.at(-1).cleanup,'completed');
+  assert.equal(events.some(row=>row.status==='completed'&&row.phase===phase+'-deploy-verify'),false);
+ });
+
+for(const phase of ['preview','production'])test(`exact accepted ${phase} receipt still qualifies release phase`,async()=>{
  const events=[];
  await observeRelease(async({stage,bindCandidate})=>{
-  bindCandidate(sha);const value=receipt('preview');
-  if(change==='mismatched')value.probe.manifestSha256='c'.repeat(64);
-  if(change==='unaccepted')value.probe.accepted=false;
-  await stage('preview-deploy-verify',()=>change==='missing'?undefined:value);
+  bindCandidate(sha);
+  return stage(phase+'-deploy-verify',()=>receipt(phase));
  },options(events));
- assert.equal(events.at(-1).effects.preview,'attempted-unreconciled');
+ assert.equal(events.at(-1).status,'completed');
+ assert.equal(events.at(-1).effects[phase],'publicly-verified');
+ assert.equal(events.at(-1).phase,'complete');
 });
 
 test('untrusted diagnostic identifiers and exception names never enter the fixed projection',async()=>{
