@@ -76,10 +76,15 @@ export async function observeRelease(operation,{emit,
   report('started');
   try{
    const result=await work();
-   if(effect&&result?.kind===effect[1]&&result?.probe?.accepted===true
-    &&candidateManifestSha256!==null&&result.candidateManifestSha256===candidateManifestSha256
-    &&result.probe.candidateManifestSha256===candidateManifestSha256
-    &&result.probe.manifestSha256===candidateManifestSha256){
+   if(effect){
+    // A provider call may have mutated Cloudflare without returning an exact
+    // public receipt. Refuse success, preserve attempted-unreconciled custody,
+    // and let the caller's original cleanup path run without retrying the effect.
+    const verified=result?.kind===effect[1]&&result?.probe?.accepted===true
+     &&candidateManifestSha256!==null&&result.candidateManifestSha256===candidateManifestSha256
+     &&result.probe.candidateManifestSha256===candidateManifestSha256
+     &&result.probe.manifestSha256===candidateManifestSha256;
+    if(!verified)throw new Error('Release phase returned no exact accepted public receipt');
     effects[effect[0]]='publicly-verified';
    }
    if(name==='preview-cleanup')cleanupStatus='completed';
