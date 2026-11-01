@@ -53,7 +53,7 @@ test('cleanup-only failure preserves successful publication evidence without cla
  assert.equal(events.at(-1).effects.production,'publicly-verified');
 });
 
-for(const phase of ['preview','production'])for(const change of ['missing','mismatched','unaccepted','wrong-kind','unbound'])
+for(const phase of ['preview','production'])for(const change of ['missing','mismatched','mismatched-receipt-candidate','mismatched-probe-candidate','unaccepted','wrong-kind','unbound'])
  test(`${phase} ${change} receipt refuses release success and preserves unresolved effect custody`,async()=>{
   const events=[];let executions=0,cleanups=0;
   await assert.rejects(observeRelease(async({stage,bindCandidate,deferCleanup})=>{
@@ -61,6 +61,8 @@ for(const phase of ['preview','production'])for(const change of ['missing','mism
    deferCleanup(()=>{cleanups++;});
    const value=receipt(phase);
    if(change==='mismatched')value.probe.manifestSha256='c'.repeat(64);
+   if(change==='mismatched-receipt-candidate')value.candidateManifestSha256='d'.repeat(64);
+   if(change==='mismatched-probe-candidate')value.probe.candidateManifestSha256='d'.repeat(64);
    if(change==='unaccepted')value.probe.accepted=false;
    if(change==='wrong-kind')value.kind='unrecognized-provider-reply';
    await stage(phase+'-deploy-verify',()=>{executions++;return change==='missing'?undefined:value;});
