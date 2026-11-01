@@ -79,7 +79,7 @@ export async function observeRelease(operation,{emit,
   if(name==='preview-cleanup')cleanupStatus='attempted-unreconciled';
   if(!blocked&&!repeated)report('started');
   try{
-   if(blocked)throw new Error('Prior release phase failed; reconcile before continuing');
+   if(blocked)throw new Error('Cannot continue after failed release phase; reconcile first');
    if(repeated)throw new Error('Release effect already attempted; reconcile before replay');
    const result=await work();
    if(effect){
