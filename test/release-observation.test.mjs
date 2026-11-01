@@ -57,13 +57,15 @@ test('cleanup-only failure preserves successful publication evidence without cla
 test('caught failed receipt stage cannot be laundered into terminal release success',async()=>{
  const events=[];let deployments=0,cleanups=0;
  await assert.rejects(observeRelease(async({stage,bindCandidate,deferCleanup})=>{
-  bindCandidate(sha);deferCleanup(()=>{cleanups++;});
+  bindCandidate(sha);deferCleanup(()=>{cleanups++;throw new TypeError('cleanup after refused receipt');});
   const invalid=receipt('preview');invalid.probe.accepted=false;
   try{await stage('preview-deploy-verify',()=>{deployments++;return invalid;});}
   catch(error){assert.match(error.message,/no exact accepted public receipt/);}
   return {publiclyVerified:true};
  },options(events)),{message:'Release phase returned no exact accepted public receipt'});
  assert.equal(deployments,1);assert.equal(cleanups,1);
+ assert.equal(events.at(-1).cleanup,'attempted-unreconciled');
+ assert.equal(events.at(-1).cleanupErrorClass,'TypeError');
  assert.equal(events.at(-1).phase,'preview-deploy-verify');
  assert.equal(events.at(-1).status,'failed');
  assert.equal(events.at(-1).effects.preview,'attempted-unreconciled');

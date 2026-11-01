@@ -61,7 +61,7 @@ export async function observeRelease(operation,{emit,
   runId:identity(runId,/^[1-9][0-9]{0,19}$/u),runAttempt:identity(runAttempt,/^[1-9][0-9]{0,7}$/u)};
  emit??=releaseEmitter();
  const effects={preview:'not-attempted',production:'not-attempted'};
- let candidateManifestSha256=null,phase=null,failedPhase=null,cleanup,cleanupStatus='not-attempted';
+ let candidateManifestSha256=null,phase=null,failedPhase=null,stageFailed=false,firstStageFailure,cleanup,cleanupStatus='not-attempted';
  const report=(status,extra={})=>{
   // Diagnostics must not replace the work's original result or exception.
   try{emit({kind:'koios.website-release-progress/v1',...binding,candidateManifestSha256,
@@ -71,10 +71,16 @@ export async function observeRelease(operation,{emit,
   if(!PHASES.has(name)||typeof work!=='function')throw new Error('Unknown release observation phase');
   phase=name;
   const effect=EFFECTS[name];
-  if(effect)effects[effect[0]]='attempted-unreconciled';
+  // Failed stages cannot be hidden by callers or followed by another effect.
+  // An attempted provider mutation cannot be replayed within this release.
+  const blocked=stageFailed&&name!=='preview-cleanup';
+  const repeated=!!effect&&effects[effect[0]]!=='not-attempted';
+  if(effect&&!blocked&&!repeated)effects[effect[0]]='attempted-unreconciled';
   if(name==='preview-cleanup')cleanupStatus='attempted-unreconciled';
-  report('started');
+  if(!blocked&&!repeated)report('started');
   try{
+   if(blocked)throw new Error('Prior release phase failed; reconcile before continuing');
+   if(repeated)throw new Error('Release effect already attempted; reconcile before replay');
    const result=await work();
    if(effect){
     // A provider call may have mutated Cloudflare without returning an exact
@@ -90,7 +96,9 @@ export async function observeRelease(operation,{emit,
    if(name==='preview-cleanup')cleanupStatus='completed';
    report('completed');return result;
   }catch(error){
-   failedPhase=name;
+   // Preserve the first stage failure, including a thrown undefined value;
+   // cleanup or a caught exception cannot turn the attempt into success.
+   if(!stageFailed){stageFailed=true;firstStageFailure=error;failedPhase=name;}
    let diagnosticPath;
    try{diagnosticPath=diagnose?.(error,{phase:name,candidateManifestSha256});}catch{}
    report('failed',{errorClass:errorClass(error),...(diagnosticPath?{diagnosticPath}:{})});throw error;
@@ -108,8 +116,9 @@ export async function observeRelease(operation,{emit,
  }catch(error){failed=true;failure=error;originalPhase=failedPhase??phase;}
  if(cleanup){
   try{await stage('preview-cleanup',cleanup);}
-  catch(error){cleanupFailed=true;cleanupFailure=error;if(!failed){failed=true;failure=error;originalPhase='preview-cleanup';}}
+  catch(error){cleanupFailed=true;cleanupFailure=error;if(!failed){failed=true;failure=firstStageFailure;originalPhase=failedPhase??'preview-cleanup';}}
  }
+ if(!failed&&stageFailed){failed=true;failure=firstStageFailure;originalPhase=failedPhase;}
  if(failed){
   phase=originalPhase;
   report('failed',{terminal:true,errorClass:errorClass(failure),
