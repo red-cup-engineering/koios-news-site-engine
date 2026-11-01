@@ -67,6 +67,21 @@ export async function observeRelease(operation,{emit,
   try{emit({kind:'koios.website-release-progress/v1',...binding,candidateManifestSha256,
    phase,status,effects:{...effects},cleanup:cleanupStatus,...extra});}catch{}
  };
+ const bindCandidate=digest=>{
+  const candidate=identity(digest,/^[a-f0-9]{64}$/u);
+  // Reasserting the same identity is idempotent; changing or invalidating it
+  // poisons this release even if the caller catches the exception.
+  if(!stageFailed&&candidate!==null
+   &&(candidateManifestSha256===null||candidateManifestSha256===candidate)){
+   candidateManifestSha256=candidate;return;
+  }
+  const error=new Error(stageFailed
+   ?'Cannot bind candidate after failed release phase; reconcile first'
+   :'Release candidate binding invalid or changed; reconcile first');
+  if(!stageFailed){stageFailed=true;firstStageFailure=error;failedPhase='candidate-read';phase='candidate-read';}
+  report('failed',{errorClass:errorClass(error)});
+  throw error;
+ };
  const stage=async(name,work)=>{
   if(!PHASES.has(name)||typeof work!=='function')throw new Error('Unknown release observation phase');
   phase=name;
@@ -106,14 +121,16 @@ export async function observeRelease(operation,{emit,
  };
  let result,failure,originalPhase,cleanupFailure,failed=false,cleanupFailed=false;
  try{
-  result=await operation({stage,
-   bindCandidate:digest=>{candidateManifestSha256=identity(digest,/^[a-f0-9]{64}$/u);},
+  result=await operation({stage,bindCandidate,
    deferCleanup:work=>{
     if(cleanup||typeof work!=='function')throw new Error('Release cleanup already assigned');
     cleanup=work;
    },
   });
- }catch(error){failed=true;failure=error;originalPhase=failedPhase??phase;}
+ }catch(error){
+  // A later blocked stage must not overwrite a caught earlier refusal.
+  failed=true;failure=stageFailed?firstStageFailure:error;originalPhase=failedPhase??phase;
+ }
  if(cleanup){
   try{await stage('preview-cleanup',cleanup);}
   catch(error){cleanupFailed=true;cleanupFailure=error;if(!failed){failed=true;failure=firstStageFailure;originalPhase=failedPhase??'preview-cleanup';}}
