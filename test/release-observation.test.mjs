@@ -53,22 +53,165 @@ test('cleanup-only failure preserves successful publication evidence without cla
  assert.equal(events.at(-1).effects.production,'publicly-verified');
 });
 
-for(const change of ['missing','mismatched','unaccepted'])test(`a ${change} receipt never earns verified effect diagnostics`,async()=>{
+
+test('caught failed receipt stage cannot be laundered into terminal release success',async()=>{
+ const events=[];let deployments=0,cleanups=0;
+ await assert.rejects(observeRelease(async({stage,bindCandidate,deferCleanup})=>{
+  bindCandidate(sha);deferCleanup(()=>{cleanups++;throw new TypeError('cleanup after refused receipt');});
+  const invalid=receipt('preview');invalid.probe.accepted=false;
+  try{await stage('preview-deploy-verify',()=>{deployments++;return invalid;});}
+  catch(error){assert.match(error.message,/no exact accepted public receipt/);}
+  return {publiclyVerified:true};
+ },options(events)),{message:'Release phase returned no exact accepted public receipt'});
+ assert.equal(deployments,1);assert.equal(cleanups,1);
+ assert.equal(events.at(-1).cleanup,'attempted-unreconciled');
+ assert.equal(events.at(-1).cleanupErrorClass,'TypeError');
+ assert.equal(events.at(-1).phase,'preview-deploy-verify');
+ assert.equal(events.at(-1).status,'failed');
+ assert.equal(events.at(-1).effects.preview,'attempted-unreconciled');
+});
+
+test('a caught failed phase refuses any later deployment, retaining the first failure',async()=>{
+ const events=[];let laterDeployments=0,cleanups=0;
+ await assert.rejects(observeRelease(async({stage,bindCandidate,deferCleanup})=>{
+  bindCandidate(sha);deferCleanup(()=>{cleanups++;});
+  const invalid=receipt('preview');invalid.probe.accepted=false;
+  try{await stage('preview-deploy-verify',()=>invalid);}catch{}
+  try{await stage('production-deploy-verify',()=>{laterDeployments++;return receipt('production');});}
+  catch(error){assert.match(error.message,/failed release phase|already attempted/);}
+  return {publiclyVerified:true};
+ },options(events)),{message:'Release phase returned no exact accepted public receipt'});
+ assert.equal(laterDeployments,0,'a failed phase cannot be followed by another deployment effect');
+ assert.equal(cleanups,1);
+ assert.deepEqual(events.at(-1).effects,{preview:'attempted-unreconciled',production:'not-attempted'});
+ assert.equal(events.at(-1).phase,'preview-deploy-verify');
+});
+
+test('an already verified deployment phase cannot execute a second time',async()=>{
+ const events=[];let mutations=0;let caught=false;
+ await assert.rejects(observeRelease(async({stage,bindCandidate})=>{
+  bindCandidate(sha);
+  await stage('production-deploy-verify',()=>{mutations++;return receipt('production');});
+  try{await stage('production-deploy-verify',()=>{mutations++;return receipt('production');});}
+  catch(error){caught=true;assert.match(error.message,/already attempted/);}
+  return {publiclyVerified:true};
+ },options(events)),/already attempted/);
+ assert.equal(caught,true);
+ assert.equal(mutations,1,'a duplicate stage must refuse before another provider call');
+ assert.equal(events.at(-1).status,'failed');
+ assert.equal(events.at(-1).effects.production,'publicly-verified');
+});
+
+test('caught undefined thrown from a stage remains a terminal failure',async()=>{
+ const events=[];let caught=false;
+ try{await observeRelease(async({stage})=>{
+  try{await stage('baseline-read',()=>{throw undefined;});}catch(error){assert.equal(error,undefined);}
+  return {publiclyVerified:true};
+ },options(events));}
+ catch(error){caught=true;assert.equal(error,undefined);}
+ assert.equal(caught,true);
+ assert.equal(events.at(-1).status,'failed');
+ assert.equal(events.at(-1).phase,'baseline-read');
+});
+
+
+test('reasserting one immutable candidate across accepted preview and production works',async()=>{
+ const events=[];let calls=0;
+ await observeRelease(async({stage,bindCandidate})=>{
+  bindCandidate(sha);
+  await stage('preview-deploy-verify',()=>{calls++;return receipt('preview');});
+  bindCandidate(sha);
+  await stage('production-deploy-verify',()=>{calls++;return receipt('production');});
+ },options(events));
+ assert.equal(calls,2);
+ assert.equal(events.at(-1).effects.preview,'publicly-verified');
+ assert.equal(events.at(-1).effects.production,'publicly-verified');
+ assert.equal(events.at(-1).status,'completed');
+});
+
+test('a caught A to B rebind cannot join two independently accepted deployments',async()=>{
+ const events=[];let later=0,first;
+ await assert.rejects(observeRelease(async({stage,bindCandidate})=>{
+  bindCandidate(sha);await stage('preview-deploy-verify',()=>receipt('preview'));
+  try{bindCandidate('c'.repeat(64));}catch(error){first=error;}
+  try{await stage('production-deploy-verify',()=>{later++;return receipt('production');});}catch{}
+  return {publiclyVerified:true};
+ },options(events)),error=>error===first);
+ assert.equal(later,0);
+ assert.equal(events.at(-1).phase,'candidate-read');
+ assert.equal(events.at(-1).status,'failed');
+ assert.deepEqual(events.at(-1).effects,{preview:'publicly-verified',production:'not-attempted'});
+});
+
+test('malformed or changed candidate caught before deployment cannot be laundered into success',async()=>{
+ for(const variant of [sha+'\\n','c'.repeat(64)]){
+  const events=[];let called=0,first;
+  await assert.rejects(observeRelease(async({stage,bindCandidate})=>{
+   if(variant.length===64)bindCandidate(sha);
+   try{bindCandidate(variant);}catch(error){first=error;}
+   try{await stage('preview-deploy-verify',()=>{called++;return receipt('preview');});}catch{}
+   return {publiclyVerified:true};
+  },options(events)),error=>error===first);
+  assert.equal(called,0);
+  assert.equal(events.at(-1).status,'failed');
+  assert.equal(events.at(-1).phase,'candidate-read');
+  assert.equal(JSON.stringify(events).includes('\\n'),false);
+ }
+});
+
+test('later uncaught blocked stage preserves the first caught receipt rejection',async()=>{
+ const events=[];let first,later=0;
+ await assert.rejects(observeRelease(async({stage,bindCandidate})=>{
+  bindCandidate(sha);
+  const invalid=receipt('preview');invalid.probe.accepted=false;
+  try{await stage('preview-deploy-verify',()=>invalid);}catch(error){first=error;}
+  await stage('production-deploy-verify',()=>{later++;return receipt('production');});
+ },options(events)),error=>error===first);
+ assert.equal(later,0);
+ assert.equal(events.at(-1).status,'failed');
+ assert.equal(events.at(-1).phase,'preview-deploy-verify');
+ assert.deepEqual(events.at(-1).effects,{preview:'attempted-unreconciled',production:'not-attempted'});
+});
+
+for(const phase of ['preview','production'])for(const change of ['missing','mismatched','mismatched-receipt-candidate','mismatched-probe-candidate','unaccepted','wrong-kind','unbound'])
+ test(`${phase} ${change} receipt refuses release success and preserves unresolved effect custody`,async()=>{
+  const events=[];let executions=0,cleanups=0;
+  await assert.rejects(observeRelease(async({stage,bindCandidate,deferCleanup})=>{
+   if(change!=='unbound')bindCandidate(sha);
+   deferCleanup(()=>{cleanups++;});
+   const value=receipt(phase);
+   if(change==='mismatched')value.probe.manifestSha256='c'.repeat(64);
+   if(change==='mismatched-receipt-candidate')value.candidateManifestSha256='d'.repeat(64);
+   if(change==='mismatched-probe-candidate')value.probe.candidateManifestSha256='d'.repeat(64);
+   if(change==='unaccepted')value.probe.accepted=false;
+   if(change==='wrong-kind')value.kind='unrecognized-provider-reply';
+   await stage(phase+'-deploy-verify',()=>{executions++;return change==='missing'?undefined:value;});
+  },options(events)),{message:'Release phase returned no exact accepted public receipt'});
+  assert.equal(executions,1,'effect may not be replayed after an ambiguous provider result');
+  assert.equal(cleanups,1,'the original cleanup path remains available');
+  assert.equal(events.at(-1).status,'failed');
+  assert.equal(events.at(-1).phase,phase+'-deploy-verify');
+  assert.equal(events.at(-1).effects[phase],'attempted-unreconciled');
+  assert.equal(events.at(-1).cleanup,'completed');
+  assert.equal(events.some(row=>row.status==='completed'&&row.phase===phase+'-deploy-verify'),false);
+ });
+
+for(const phase of ['preview','production'])test(`exact accepted ${phase} receipt still qualifies release phase`,async()=>{
  const events=[];
  await observeRelease(async({stage,bindCandidate})=>{
-  bindCandidate(sha);const value=receipt('preview');
-  if(change==='mismatched')value.probe.manifestSha256='c'.repeat(64);
-  if(change==='unaccepted')value.probe.accepted=false;
-  await stage('preview-deploy-verify',()=>change==='missing'?undefined:value);
+  bindCandidate(sha);
+  return stage(phase+'-deploy-verify',()=>receipt(phase));
  },options(events));
- assert.equal(events.at(-1).effects.preview,'attempted-unreconciled');
+ assert.equal(events.at(-1).status,'completed');
+ assert.equal(events.at(-1).effects[phase],'publicly-verified');
+ assert.equal(events.at(-1).phase,'complete');
 });
 
 test('untrusted diagnostic identifiers and exception names never enter the fixed projection',async()=>{
  const events=[],original={name:'secret-value',message:'private-value'};
  await assert.rejects(observeRelease(async({stage,bindCandidate})=>{
   bindCandidate(sha+'\n');await stage('baseline-read',()=>{throw original;});
- },{...options(events),revision:revision+'\n',runId:'secret',runAttempt:'1\n'}),error=>error===original);
+ },{...options(events),revision:revision+'\n',runId:'secret',runAttempt:'1\n'}),error=>error instanceof Error&&/candidate binding invalid/.test(error.message));
  const row=events.at(-1);assert.equal(row.revision,null);assert.equal(row.runId,null);assert.equal(row.runAttempt,null);
  assert.equal(row.candidateManifestSha256,null);assert.equal(row.errorClass,'Error');
  assert.equal(JSON.stringify(events).includes('secret'),false);assert.equal(JSON.stringify(events).includes('private'),false);

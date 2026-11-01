@@ -16,6 +16,8 @@ on:
       - 'src/render/templates.mjs'
       - 'src/carrier.mjs'
       - 'test/carrier-probe-retry.test.mjs'
+      - 'src/release-observation.mjs'
+      - 'test/release-observation.test.mjs'
       - 'src/render/head.mjs'
       - 'test/structured-data.test.mjs'
       - 'src/render/corrections.mjs'
@@ -45,6 +47,8 @@ on:
       - 'src/render/templates.mjs'
       - 'src/carrier.mjs'
       - 'test/carrier-probe-retry.test.mjs'
+      - 'src/release-observation.mjs'
+      - 'test/release-observation.test.mjs'
       - 'src/render/head.mjs'
       - 'test/structured-data.test.mjs'
       - 'src/render/corrections.mjs'
@@ -111,6 +115,8 @@ jobs:
           node --check test/structured-data.test.mjs
           node --check src/carrier.mjs
           node --check test/carrier-probe-retry.test.mjs
+          node --check src/release-observation.mjs
+          node --check test/release-observation.test.mjs
           node --check src/render/corrections.mjs
           node --check scripts/verify-corrections-receiving.mjs
           node --check test/correction-intake.test.mjs

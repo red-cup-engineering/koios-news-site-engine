@@ -61,31 +61,59 @@ export async function observeRelease(operation,{emit,
   runId:identity(runId,/^[1-9][0-9]{0,19}$/u),runAttempt:identity(runAttempt,/^[1-9][0-9]{0,7}$/u)};
  emit??=releaseEmitter();
  const effects={preview:'not-attempted',production:'not-attempted'};
- let candidateManifestSha256=null,phase=null,failedPhase=null,cleanup,cleanupStatus='not-attempted';
+ let candidateManifestSha256=null,phase=null,failedPhase=null,stageFailed=false,firstStageFailure,cleanup,cleanupStatus='not-attempted';
  const report=(status,extra={})=>{
   // Diagnostics must not replace the work's original result or exception.
   try{emit({kind:'koios.website-release-progress/v1',...binding,candidateManifestSha256,
    phase,status,effects:{...effects},cleanup:cleanupStatus,...extra});}catch{}
  };
+ const bindCandidate=digest=>{
+  const candidate=identity(digest,/^[a-f0-9]{64}$/u);
+  // Reasserting the same identity is idempotent; changing or invalidating it
+  // poisons this release even if the caller catches the exception.
+  if(!stageFailed&&candidate!==null
+   &&(candidateManifestSha256===null||candidateManifestSha256===candidate)){
+   candidateManifestSha256=candidate;return;
+  }
+  const error=new Error(stageFailed
+   ?'Cannot bind candidate after failed release phase; reconcile first'
+   :'Release candidate binding invalid or changed; reconcile first');
+  if(!stageFailed){stageFailed=true;firstStageFailure=error;failedPhase='candidate-read';phase='candidate-read';}
+  report('failed',{errorClass:errorClass(error)});
+  throw error;
+ };
  const stage=async(name,work)=>{
   if(!PHASES.has(name)||typeof work!=='function')throw new Error('Unknown release observation phase');
   phase=name;
   const effect=EFFECTS[name];
-  if(effect)effects[effect[0]]='attempted-unreconciled';
+  // Failed stages cannot be hidden by callers or followed by another effect.
+  // An attempted provider mutation cannot be replayed within this release.
+  const blocked=stageFailed&&name!=='preview-cleanup';
+  const repeated=!!effect&&effects[effect[0]]!=='not-attempted';
+  if(effect&&!blocked&&!repeated)effects[effect[0]]='attempted-unreconciled';
   if(name==='preview-cleanup')cleanupStatus='attempted-unreconciled';
-  report('started');
+  if(!blocked&&!repeated)report('started');
   try{
+   if(blocked)throw new Error('Cannot continue after failed release phase; reconcile first');
+   if(repeated)throw new Error('Release effect already attempted; reconcile before replay');
    const result=await work();
-   if(effect&&result?.kind===effect[1]&&result?.probe?.accepted===true
-    &&candidateManifestSha256!==null&&result.candidateManifestSha256===candidateManifestSha256
-    &&result.probe.candidateManifestSha256===candidateManifestSha256
-    &&result.probe.manifestSha256===candidateManifestSha256){
+   if(effect){
+    // A provider call may have mutated Cloudflare without returning an exact
+    // public receipt. Refuse success, preserve attempted-unreconciled custody,
+    // and let the caller's original cleanup path run without retrying the effect.
+    const verified=result?.kind===effect[1]&&result?.probe?.accepted===true
+     &&candidateManifestSha256!==null&&result.candidateManifestSha256===candidateManifestSha256
+     &&result.probe.candidateManifestSha256===candidateManifestSha256
+     &&result.probe.manifestSha256===candidateManifestSha256;
+    if(!verified)throw new Error('Release phase returned no exact accepted public receipt');
     effects[effect[0]]='publicly-verified';
    }
    if(name==='preview-cleanup')cleanupStatus='completed';
    report('completed');return result;
   }catch(error){
-   failedPhase=name;
+   // Preserve the first stage failure, including a thrown undefined value;
+   // cleanup or a caught exception cannot turn the attempt into success.
+   if(!stageFailed){stageFailed=true;firstStageFailure=error;failedPhase=name;}
    let diagnosticPath;
    try{diagnosticPath=diagnose?.(error,{phase:name,candidateManifestSha256});}catch{}
    report('failed',{errorClass:errorClass(error),...(diagnosticPath?{diagnosticPath}:{})});throw error;
@@ -93,18 +121,21 @@ export async function observeRelease(operation,{emit,
  };
  let result,failure,originalPhase,cleanupFailure,failed=false,cleanupFailed=false;
  try{
-  result=await operation({stage,
-   bindCandidate:digest=>{candidateManifestSha256=identity(digest,/^[a-f0-9]{64}$/u);},
+  result=await operation({stage,bindCandidate,
    deferCleanup:work=>{
     if(cleanup||typeof work!=='function')throw new Error('Release cleanup already assigned');
     cleanup=work;
    },
   });
- }catch(error){failed=true;failure=error;originalPhase=failedPhase??phase;}
+ }catch(error){
+  // A later blocked stage must not overwrite a caught earlier refusal.
+  failed=true;failure=stageFailed?firstStageFailure:error;originalPhase=failedPhase??phase;
+ }
  if(cleanup){
   try{await stage('preview-cleanup',cleanup);}
-  catch(error){cleanupFailed=true;cleanupFailure=error;if(!failed){failed=true;failure=error;originalPhase='preview-cleanup';}}
+  catch(error){cleanupFailed=true;cleanupFailure=error;if(!failed){failed=true;failure=firstStageFailure;originalPhase=failedPhase??'preview-cleanup';}}
  }
+ if(!failed&&stageFailed){failed=true;failure=firstStageFailure;originalPhase=failedPhase;}
  if(failed){
   phase=originalPhase;
   report('failed',{terminal:true,errorClass:errorClass(failure),
