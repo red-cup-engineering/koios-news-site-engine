@@ -53,6 +53,65 @@ test('cleanup-only failure preserves successful publication evidence without cla
  assert.equal(events.at(-1).effects.production,'publicly-verified');
 });
 
+
+test('caught failed receipt stage cannot be laundered into terminal release success',async()=>{
+ const events=[];let deployments=0,cleanups=0;
+ await assert.rejects(observeRelease(async({stage,bindCandidate,deferCleanup})=>{
+  bindCandidate(sha);deferCleanup(()=>{cleanups++;});
+  const invalid=receipt('preview');invalid.probe.accepted=false;
+  try{await stage('preview-deploy-verify',()=>{deployments++;return invalid;});}
+  catch(error){assert.match(error.message,/no exact accepted public receipt/);}
+  return {publiclyVerified:true};
+ },options(events)),{message:'Release phase returned no exact accepted public receipt'});
+ assert.equal(deployments,1);assert.equal(cleanups,1);
+ assert.equal(events.at(-1).phase,'preview-deploy-verify');
+ assert.equal(events.at(-1).status,'failed');
+ assert.equal(events.at(-1).effects.preview,'attempted-unreconciled');
+});
+
+test('a caught failed phase refuses any later deployment, retaining the first failure',async()=>{
+ const events=[];let laterDeployments=0,cleanups=0;
+ await assert.rejects(observeRelease(async({stage,bindCandidate,deferCleanup})=>{
+  bindCandidate(sha);deferCleanup(()=>{cleanups++;});
+  const invalid=receipt('preview');invalid.probe.accepted=false;
+  try{await stage('preview-deploy-verify',()=>invalid);}catch{}
+  try{await stage('production-deploy-verify',()=>{laterDeployments++;return receipt('production');});}
+  catch(error){assert.match(error.message,/failed release phase|already attempted/);}
+  return {publiclyVerified:true};
+ },options(events)),{message:'Release phase returned no exact accepted public receipt'});
+ assert.equal(laterDeployments,0,'a failed phase cannot be followed by another deployment effect');
+ assert.equal(cleanups,1);
+ assert.deepEqual(events.at(-1).effects,{preview:'attempted-unreconciled',production:'not-attempted'});
+ assert.equal(events.at(-1).phase,'preview-deploy-verify');
+});
+
+test('an already verified deployment phase cannot execute a second time',async()=>{
+ const events=[];let mutations=0;let caught=false;
+ await assert.rejects(observeRelease(async({stage,bindCandidate})=>{
+  bindCandidate(sha);
+  await stage('production-deploy-verify',()=>{mutations++;return receipt('production');});
+  try{await stage('production-deploy-verify',()=>{mutations++;return receipt('production');});}
+  catch(error){caught=true;assert.match(error.message,/already attempted/);}
+  return {publiclyVerified:true};
+ },options(events)),/already attempted/);
+ assert.equal(caught,true);
+ assert.equal(mutations,1,'a duplicate stage must refuse before another provider call');
+ assert.equal(events.at(-1).status,'failed');
+ assert.equal(events.at(-1).effects.production,'publicly-verified');
+});
+
+test('caught undefined thrown from a stage remains a terminal failure',async()=>{
+ const events=[];let caught=false;
+ try{await observeRelease(async({stage})=>{
+  try{await stage('baseline-read',()=>{throw undefined;});}catch(error){assert.equal(error,undefined);}
+  return {publiclyVerified:true};
+ },options(events));}
+ catch(error){caught=true;assert.equal(error,undefined);}
+ assert.equal(caught,true);
+ assert.equal(events.at(-1).status,'failed');
+ assert.equal(events.at(-1).phase,'baseline-read');
+});
+
 for(const phase of ['preview','production'])for(const change of ['missing','mismatched','mismatched-receipt-candidate','mismatched-probe-candidate','unaccepted','wrong-kind','unbound'])
  test(`${phase} ${change} receipt refuses release success and preserves unresolved effect custody`,async()=>{
   const events=[];let executions=0,cleanups=0;
