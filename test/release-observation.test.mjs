@@ -114,6 +114,65 @@ test('caught undefined thrown from a stage remains a terminal failure',async()=>
  assert.equal(events.at(-1).phase,'baseline-read');
 });
 
+
+test('reasserting one immutable candidate across accepted preview and production works',async()=>{
+ const events=[];let calls=0;
+ await observeRelease(async({stage,bindCandidate})=>{
+  bindCandidate(sha);
+  await stage('preview-deploy-verify',()=>{calls++;return receipt('preview');});
+  bindCandidate(sha);
+  await stage('production-deploy-verify',()=>{calls++;return receipt('production');});
+ },options(events));
+ assert.equal(calls,2);
+ assert.equal(events.at(-1).effects.preview,'publicly-verified');
+ assert.equal(events.at(-1).effects.production,'publicly-verified');
+ assert.equal(events.at(-1).status,'completed');
+});
+
+test('a caught A to B rebind cannot join two independently accepted deployments',async()=>{
+ const events=[];let later=0,first;
+ await assert.rejects(observeRelease(async({stage,bindCandidate})=>{
+  bindCandidate(sha);await stage('preview-deploy-verify',()=>receipt('preview'));
+  try{bindCandidate('c'.repeat(64));}catch(error){first=error;}
+  try{await stage('production-deploy-verify',()=>{later++;return receipt('production');});}catch{}
+  return {publiclyVerified:true};
+ },options(events)),error=>error===first);
+ assert.equal(later,0);
+ assert.equal(events.at(-1).phase,'candidate-read');
+ assert.equal(events.at(-1).status,'failed');
+ assert.deepEqual(events.at(-1).effects,{preview:'publicly-verified',production:'not-attempted'});
+});
+
+test('malformed or changed candidate caught before deployment cannot be laundered into success',async()=>{
+ for(const variant of [sha+'\\n','c'.repeat(64)]){
+  const events=[];let called=0,first;
+  await assert.rejects(observeRelease(async({stage,bindCandidate})=>{
+   if(variant.length===64)bindCandidate(sha);
+   try{bindCandidate(variant);}catch(error){first=error;}
+   try{await stage('preview-deploy-verify',()=>{called++;return receipt('preview');});}catch{}
+   return {publiclyVerified:true};
+  },options(events)),error=>error===first);
+  assert.equal(called,0);
+  assert.equal(events.at(-1).status,'failed');
+  assert.equal(events.at(-1).phase,'candidate-read');
+  assert.equal(JSON.stringify(events).includes('\\n'),false);
+ }
+});
+
+test('later uncaught blocked stage preserves the first caught receipt rejection',async()=>{
+ const events=[];let first,later=0;
+ await assert.rejects(observeRelease(async({stage,bindCandidate})=>{
+  bindCandidate(sha);
+  const invalid=receipt('preview');invalid.probe.accepted=false;
+  try{await stage('preview-deploy-verify',()=>invalid);}catch(error){first=error;}
+  await stage('production-deploy-verify',()=>{later++;return receipt('production');});
+ },options(events)),error=>error===first);
+ assert.equal(later,0);
+ assert.equal(events.at(-1).status,'failed');
+ assert.equal(events.at(-1).phase,'preview-deploy-verify');
+ assert.deepEqual(events.at(-1).effects,{preview:'attempted-unreconciled',production:'not-attempted'});
+});
+
 for(const phase of ['preview','production'])for(const change of ['missing','mismatched','mismatched-receipt-candidate','mismatched-probe-candidate','unaccepted','wrong-kind','unbound'])
  test(`${phase} ${change} receipt refuses release success and preserves unresolved effect custody`,async()=>{
   const events=[];let executions=0,cleanups=0;
@@ -152,7 +211,7 @@ test('untrusted diagnostic identifiers and exception names never enter the fixed
  const events=[],original={name:'secret-value',message:'private-value'};
  await assert.rejects(observeRelease(async({stage,bindCandidate})=>{
   bindCandidate(sha+'\n');await stage('baseline-read',()=>{throw original;});
- },{...options(events),revision:revision+'\n',runId:'secret',runAttempt:'1\n'}),error=>error===original);
+ },{...options(events),revision:revision+'\n',runId:'secret',runAttempt:'1\n'}),error=>error instanceof Error&&/candidate binding invalid/.test(error.message));
  const row=events.at(-1);assert.equal(row.revision,null);assert.equal(row.runId,null);assert.equal(row.runAttempt,null);
  assert.equal(row.candidateManifestSha256,null);assert.equal(row.errorClass,'Error');
  assert.equal(JSON.stringify(events).includes('secret'),false);assert.equal(JSON.stringify(events).includes('private'),false);
