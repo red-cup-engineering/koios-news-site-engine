@@ -24,6 +24,8 @@ import { renderMarkdown, renderArticleMarkdown, escapeHtml } from "./render/mark
 import { faviconSvg, webManifest, absoluteUrl } from "./render/head.mjs";
 import { renderRss, renderAtom, renderJsonFeed } from "./render/feeds.mjs";
 import { renderSitemap, renderNewsSitemap, renderRobotsTxt, renderAdsTxt } from "./render/sitemaps.mjs";
+import { renderSecurityTxt } from "./render/discovery.mjs";
+import { renderAppleTouchIcon, renderFaviconIco } from "./render/brand-icons.mjs";
 import { buildSearchIndex, searchClientScript } from "./render/search-index.mjs";
 import { shareClientScript } from "./render/share-client.mjs";
 import { houseAdClientScript } from "./render/house-ad-client.mjs";
@@ -576,6 +578,7 @@ function assetHeaders(property, posts = []) {
   Referrer-Policy: strict-origin-when-cross-origin
   X-Content-Type-Options: nosniff
   X-Frame-Options: DENY
+  Strict-Transport-Security: max-age=63072000
 ` + articlePrice + immutable + mediaHeaders;
 }
 
@@ -748,6 +751,8 @@ export function buildProperty({ property, contentDir, outputDir, claimStoreDir, 
   set("assets/share.js", shareClientScript());
   if (property.monetization?.houseAds?.server) set("assets/house-ad.js", houseAdClientScript());
   set("favicon.svg", faviconSvg(property.name, theme.seeds.accent, theme.seeds.ink));
+  set("favicon.ico", renderFaviconIco(property, theme.seeds));
+  set("apple-touch-icon.png", renderAppleTouchIcon(property, theme.seeds));
   set("og.png", renderBrandPng(property));
   set("logo.png", renderBrandLogoPng(property));
   set("manifest.webmanifest", `${JSON.stringify(webManifest({ name: property.name, accent: theme.seeds.accent, surface: theme.seeds.surface }), null, 2)}\n`);
@@ -1086,6 +1091,7 @@ export function buildProperty({ property, contentDir, outputDir, claimStoreDir, 
   set("sitemap.xml", renderSitemap(sitemapEntries, property));
   set("news-sitemap.xml", renderNewsSitemap(enriched, property, asOf));
   set("robots.txt", renderRobotsTxt(property));
+  set(".well-known/security.txt", renderSecurityTxt(property, new Date(asOf)));
   const adsTxt = renderAdsTxt(property);
   if (adsTxt !== undefined) set("ads.txt", adsTxt);
   if (redirects.size > 2_000) throw new Error("historical addresses exceed the static redirect limit");

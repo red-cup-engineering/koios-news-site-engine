@@ -9,6 +9,7 @@
  * request-time worker, which this static carrier deliberately is not.
  * Callers can supply `asOf` to reproduce a particular build.
  */
+import { AI_CRAWLERS } from "./discovery.mjs";
 import { newsSitemap, robots, sitemap } from "@red-cup-engineering/computer-serialized-content-engineering-services-section/web-feed";
 
 const NEWS_WINDOW_MS = 48 * 60 * 60 * 1000;
@@ -58,7 +59,7 @@ export function renderNewsSitemap(posts, property, asOf = new Date()) {
  * grounding. Each gets an explicit group so its permission does not depend on
  * how a crawler resolves the wildcard group.
  */
-export const AI_CRAWLER_USER_AGENTS = Object.freeze(["GPTBot", "OAI-SearchBot", "ClaudeBot", "PerplexityBot", "Google-Extended"]);
+export const AI_CRAWLER_USER_AGENTS = Object.freeze([...new Set(["GPTBot", "OAI-SearchBot", "ClaudeBot", "PerplexityBot", "Google-Extended", ...AI_CRAWLERS])]);
 
 /**
  * Render `robots.txt`: every crawler, the named AI crawlers among them, may

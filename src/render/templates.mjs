@@ -14,6 +14,7 @@ import { postInstants, publishedDay, latestModified } from "../publication-insta
 import { aiAuthorshipStatement, authorPathFor, authorProfile, isDeskByline } from "./authors.mjs";
 import { LOGO_DIMENSIONS } from "./article-fingerprint.mjs";
 import { renderPublicationMedia } from "./media.mjs";
+import { homeDescription, parentOrganizations } from "./discovery.mjs";
 
 const PAGE_SIZE = 12;
 const esc = escapeHtml;
@@ -293,7 +294,7 @@ export function renderHomePage({ property, posts, mostRead, asOf }) {
   ].filter(Boolean).join("\n");
   const headCtx = {
     title: property.name,
-    description: property.tagline ?? "",
+    description: homeDescription(property),
     canonical: url(property, "/"),
     siteName: property.name,
     ogType: "website",
@@ -301,8 +302,9 @@ export function renderHomePage({ property, posts, mostRead, asOf }) {
     jsonLd: [
       { ...newsMediaOrganizationJsonLd({ id: url(property, "/#publisher"), name: property.name, url: `${property.origin}/`, logo: url(property, "/logo.png") }),
         mainEntityOfPage: { "@id": url(property, "/") },
-        logo: { "@type": "ImageObject", ...publisherLogo(property) } },
-      webSiteJsonLd({ name: property.name, url: `${property.origin}/`, description: property.tagline, inLanguage: property.language,
+        logo: { "@type": "ImageObject", ...publisherLogo(property) },
+        parentOrganization: parentOrganizations(property) },
+      webSiteJsonLd({ name: property.name, url: `${property.origin}/`, description: homeDescription(property), inLanguage: property.language,
         publisherId: url(property, "/#publisher"), searchUrlTemplate: `${url(property, "/search/")}?q={search_term_string}` }),
     ],
     fediverseCreator: property.distribution?.activityPubActor,
