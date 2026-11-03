@@ -37,15 +37,17 @@ const errorClass=error=>{
 
 /** Keep body consumption in the same six-attempt, 20-second read budget as headers.
  * No provider command, admission change or deployment retry belongs in this helper. */
-export async function readPublicBaseline({fetchImpl=fetch,wait=ms=>new Promise(r=>setTimeout(r,ms))}={}){
+export async function readPublicBaseline({fetchImpl=fetch,wait=ms=>new Promise(r=>setTimeout(r,ms)),checkpoint=async()=>{}}={}){
  for(let attempt=0;attempt<6;attempt++){
   try{
+   await checkpoint();
    const response=await fetchImpl('https://koios.news/manifest.json',{
     headers:{'cache-control':'no-cache'},signal:AbortSignal.timeout(20000),
    });
    if(!response.ok)throw new Error(`live baseline returned ${response.status}`);
-   return Buffer.from(await response.arrayBuffer());
+   const bytes=Buffer.from(await response.arrayBuffer());await checkpoint();return bytes;
   }catch(error){
+   try{await checkpoint();}catch(custody){if(Object.is(error,custody))throw error;throw new AggregateError([error,custody],'Public baseline reading and custody both failed');}
    if(attempt===5)throw error;
    await wait(1000*(attempt+1));
   }
@@ -56,7 +58,8 @@ export async function readPublicBaseline({fetchImpl=fetch,wait=ms=>new Promise(r
  * Only a returned accepted receipt advances its effect witness. Cleanup failure
  * never replaces the original exception; both fixed classes appear in the report. */
 export async function observeRelease(operation,{emit,
- diagnose,revision=process.env.GITHUB_SHA,runId=process.env.GITHUB_RUN_ID,runAttempt=process.env.GITHUB_RUN_ATTEMPT}={}){
+ diagnose,checkpoint=async()=>{},revision=process.env.GITHUB_SHA,runId=process.env.GITHUB_RUN_ID,runAttempt=process.env.GITHUB_RUN_ATTEMPT}={}){
+ if(typeof checkpoint!=='function')throw new TypeError('Release observation needs a private execution checkpoint');
  const binding={revision:identity(revision,/^[a-f0-9]{40}$/u),
   runId:identity(runId,/^[1-9][0-9]{0,19}$/u),runAttempt:identity(runAttempt,/^[1-9][0-9]{0,7}$/u)};
  emit??=releaseEmitter();
@@ -96,7 +99,9 @@ export async function observeRelease(operation,{emit,
   try{
    if(blocked)throw new Error('Cannot continue after failed release phase; reconcile first');
    if(repeated)throw new Error('Release effect already attempted; reconcile before replay');
+   await checkpoint();
    const result=await work();
+   await checkpoint();
    if(effect){
     // A provider call may have mutated Cloudflare without returning an exact
     // public receipt. Refuse success, preserve attempted-unreconciled custody,
@@ -114,8 +119,10 @@ export async function observeRelease(operation,{emit,
    // Preserve the first stage failure, including a thrown undefined value;
    // cleanup or a caught exception cannot turn the attempt into success.
    if(!stageFailed){stageFailed=true;firstStageFailure=error;failedPhase=name;}
+   try{await checkpoint();}
+   catch(custody){if(Object.is(error,custody)||error instanceof AggregateError&&error.errors.includes(custody))throw error;throw new AggregateError([error,custody],'Website release and execution custody both failed');}
    let diagnosticPath;
-   try{diagnosticPath=diagnose?.(error,{phase:name,candidateManifestSha256});}catch{}
+   try{diagnosticPath=await diagnose?.(error,{phase:name,candidateManifestSha256});}catch{}
    report('failed',{errorClass:errorClass(error),...(diagnosticPath?{diagnosticPath}:{})});throw error;
   }
  };

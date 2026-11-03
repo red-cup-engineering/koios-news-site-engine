@@ -79,10 +79,11 @@ function retryableProbeError(error) {
     ["ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "EAI_AGAIN"].includes(error?.cause?.code);
 }
 /** The pinned Wrangler runs under the carrier's own Node runtime, never whichever `node` a host PATH names first. */
-export function runPinnedWrangler(program, args, { environment = process.env } = {}) {
+export function runPinnedWrangler(program, args, { environment = process.env, stagingRoot } = {}) {
   // Wrangler writes state beside its configuration. Installed programs remain
   // immutable; each invocation receives a separate writable working directory.
-  const workspace = mkdtempSync(join(tmpdir(), "koios-wrangler-"));
+  if(stagingRoot!==undefined)mkdirSync(stagingRoot,{recursive:true,mode:0o700});
+  const workspace = mkdtempSync(join(stagingRoot??tmpdir(), "koios-wrangler-"));
   try {
     const invocation = [...args], config = invocation.indexOf("--config");
     if (config >= 0 && invocation[config + 1] === WRANGLER_STATIC_CONFIG) {
@@ -94,6 +95,29 @@ export function runPinnedWrangler(program, args, { environment = process.env } =
     return spawnSync(process.execPath, [program, ...invocation], { cwd: workspace,
       encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: environment });
   } finally { rmSync(workspace, { recursive: true, force: true }); }
+}
+/** The asynchronous scoped entrance retains staging if original custody is lost. */
+export async function runPinnedWranglerScoped(program,args,{environment,stagingRoot,checkpoint}={}) {
+  if(!environment||typeof checkpoint!=='function'||typeof stagingRoot!=='string'||resolve(stagingRoot)!==stagingRoot)
+    throw new TypeError('Scoped Wrangler requires original environment, owner staging and execution custody');
+  environment=Object.freeze({...environment});
+  await checkpoint();mkdirSync(stagingRoot,{recursive:true,mode:0o700});
+  const workspace=mkdtempSync(join(stagingRoot,'koios-wrangler-'));
+  let failure;
+  try {
+    const invocation=[...args],config=invocation.indexOf('--config');
+    if(config>=0&&invocation[config+1]===WRANGLER_STATIC_CONFIG){
+      verifyStaticAssetConfig();const writableConfig=join(workspace,'wrangler.json');
+      await checkpoint();copyFileSync(WRANGLER_STATIC_CONFIG,writableConfig);invocation[config+1]=writableConfig;
+    }
+    await checkpoint();
+    const result=spawnSync(process.execPath,[program,...invocation],{cwd:workspace,encoding:'utf8',stdio:['ignore','pipe','pipe'],env:environment});
+    await checkpoint();return result;
+  } catch(error){failure=error;throw error;}
+  finally {
+    try{await checkpoint();rmSync(workspace,{recursive:true,force:true});}
+    catch(error){if(failure&&!Object.is(failure,error))throw new AggregateError([failure,error],'Website command and staging custody both failed');throw error;}
+  }
 }
 export function verifyPinnedWrangler() {
   const packageRoot = fileURLToPath(new URL("../", import.meta.url)),
@@ -1030,10 +1054,22 @@ export function observeProductionVersion({ environment = process.env, executor }
   const run = executor ?? runPinnedWrangler,
     readback = deploymentReadback(TARGET.workerName),
     deployments = providerDeployments(run(readback.program, readback.args, { environment }));
+  return productionVersionOf(deployments);
+}
+function productionVersionOf(deployments) {
   const latest = [...deployments].sort((a, b) => Date.parse(a.created_on) - Date.parse(b.created_on)).at(-1),
     active = latest?.versions.filter(({ percentage }) => percentage === 100) ?? [];
   if (!latest || latest.versions.length !== 1 || active.length !== 1) throw new Error("current production deployment is not one exact 100 percent version");
   return Object.freeze({ deploymentId: latest.id, versionId: active[0].version_id, createdOn: latest.created_on });
+}
+export async function observeProductionVersionScoped({environment,executor,checkpoint,stagingRoot}={}) {
+  if(typeof checkpoint!=='function'||!environment)throw new TypeError('Scoped rollback readback requires original environment and custody');
+  environment=Object.freeze({...environment});
+  await checkpoint();exact(environment.CLOUDFLARE_ACCOUNT_ID,TARGET.accountId,'CLOUDFLARE_ACCOUNT_ID');
+  if(executor===undefined||executor===runPinnedWrangler||executor===runPinnedWranglerScoped)verifyPinnedWrangler();
+  const readback=deploymentReadback(TARGET.workerName),run=executor??runPinnedWranglerScoped;
+  const result=await run(readback.program,readback.args,{environment,checkpoint,stagingRoot});
+  await checkpoint();return productionVersionOf(providerDeployments(result));
 }
 function observedProviderDeployment(before, after) {
   const priorIds = new Set(before.map(({ id }) => id));
@@ -1100,15 +1136,16 @@ async function observeExactDeployment(candidate, binding, url, phase, fetchImpl)
     bindingSha256: binding.digest, manifestSha256: sha256Hex(manifestBytes), notFound, artifacts, redirects });
 }
 export async function auditProduction(
-  { candidateDir, bindingPath, receiptOut, fetchImpl = fetch },
+  { candidateDir, bindingPath, receiptOut, fetchImpl = fetch, checkpoint = async()=>{} },
 ) {
+  await checkpoint();
   if (!receiptOut || existsSync(resolve(receiptOut))) {
     throw new Error("a new immutable production audit receipt path is required");
   }
   const candidate = verifyCandidate(candidateDir),
     binding = verifyBinding(bindingPath),
     probe = await observeExactDeployment(candidate, binding, "https://koios.news/", "release", fetchImpl);
-  return receiptPath(receiptOut, {
+  await checkpoint();return receiptPath(receiptOut, {
     kind: "koios.news.cloudflare-production-observation-receipt/v1",
     candidateManifestSha256: candidate.manifestDigest,
     binding: TARGET,
@@ -1118,36 +1155,40 @@ export async function auditProduction(
 }
 export async function executeObservedAuthorized(
   { phase, plan: releasePlan, receiptOut, replayRoot, environment = process.env,
-    executor, url, fetchImpl = fetch },
+    executor, url, fetchImpl = fetch, checkpoint = async()=>{}, stagingRoot },
 ) {
+  environment=Object.freeze({...environment});
+  await checkpoint();
   const disposition = phase === "preview" ? "preview-authorized" : phase === "release" ? "release-authorized" : undefined;
   if (!releasePlan || releasePlan.phase !== phase || releasePlan.disposition !== disposition) throw new Error("only an exact-phase authorized preview or release plan can execute");
   if (!receiptOut || existsSync(resolve(receiptOut))) throw new Error("a new immutable receipt path is required before execution");
   exact(environment.CLOUDFLARE_ACCOUNT_ID, TARGET.accountId, "CLOUDFLARE_ACCOUNT_ID");
   const deployment = releasePlan.commands?.[0];
   exact(deployment?.program, WRANGLER, "authorized deployment executable");
-  const toolchain = executor === undefined ? verifyPinnedWrangler() : Object.freeze({ version: WRANGLER_VERSION, injectedExecutor: true });
+  const toolchain = executor === undefined || executor === runPinnedWrangler || executor === runPinnedWranglerScoped ? verifyPinnedWrangler() : Object.freeze({ version: WRANGLER_VERSION, injectedExecutor: true });
   const nameIndex = deployment.args.indexOf("--name"), deployedName = deployment.args[nameIndex + 1],
     expectedName = phase === "release" ? TARGET.workerName : `${TARGET.workerName}-preview-${releasePlan.candidate.manifestSha256.slice(0, 12)}`;
   exact(deployedName, expectedName, "authorized deployment worker name");
-  const run = executor ?? runPinnedWrangler,
-    readbackCommand = deploymentReadback(deployedName),
-    before = providerDeployments(run(readbackCommand.program, readbackCommand.args, { environment }), { allowAbsent: phase === "preview" }),
-    authorityUsePath = consume(replayRoot, releasePlan);
-  const deployed = run(deployment.program, deployment.args, { environment });
+  const run = executor ?? runPinnedWrangler,readbackCommand = deploymentReadback(deployedName);
+  await checkpoint();
+  const before = providerDeployments(await run(readbackCommand.program, readbackCommand.args, { environment,checkpoint,stagingRoot }), { allowAbsent: phase === "preview" });
+  await checkpoint();const authorityUsePath = consume(replayRoot, releasePlan);
+  await checkpoint();const deployed = await run(deployment.program, deployment.args, { environment,checkpoint,stagingRoot });
+  await checkpoint();
   if (!deployed || deployed.status !== 0) throw commandFailure({
     result: deployed, phase, environment, receiptOut,
     attributes: { "koios.release.authority_use.path": authorityUsePath,
       "koios.release.candidate.sha256": releasePlan.candidate.manifestSha256,
       "koios.release.worker.name": deployedName },
   });
-  const after = providerDeployments(run(readbackCommand.program, readbackCommand.args, { environment })),
+  const after = providerDeployments(await run(readbackCommand.program, readbackCommand.args, { environment,checkpoint,stagingRoot })),
     provider = observedProviderDeployment(before, after);
+  await checkpoint();
   const candidate = { root: deployment.args[deployment.args.indexOf("--assets") + 1], manifestDigest: releasePlan.candidate.manifestSha256, manifestBytes: readFileSync(join(deployment.args[deployment.args.indexOf("--assets") + 1], "manifest.json")), manifest: verifyCandidate(deployment.args[deployment.args.indexOf("--assets") + 1]).manifest };
   const binding = { digest: releasePlan.bindingSha256 };
   writeFileSync(`${resolve(receiptOut)}.deployment.json`, JSON.stringify({phase, provider, candidateManifestSha256: candidate.manifestDigest, uploadedArtifacts: candidate.manifest.artifacts.length, stdout: deployed.stdout}, null, 2));
   const probe = await observeExactDeployment(candidate, binding, url, phase, fetchImpl);
-  return receiptPath(receiptOut, {
+  await checkpoint();return receiptPath(receiptOut, {
     kind: phase === "preview"
       ? "koios.news.cloudflare-preview-deployment-receipt/v1"
       : "koios.news.cloudflare-release-receipt/v1",
@@ -1434,8 +1475,9 @@ function previewReceivingArtifacts(candidate) {
 }
 
 export async function acceptPreviewProbe(
-  { candidateDir, bindingPath, url, receiptOut, fetchImpl = fetch },
+  { candidateDir, bindingPath, url, receiptOut, fetchImpl = fetch, checkpoint = async()=>{} },
 ) {
+  await checkpoint();
   const candidate = verifyCandidate(candidateDir),
     binding = verifyBinding(bindingPath),
     base = safeUrl(url);
@@ -1469,7 +1511,7 @@ export async function acceptPreviewProbe(
     });
   }
   const redirects = await observeRedirects(base, candidate, fetchImpl);
-  return receiptPath(receiptOut, {
+  await checkpoint();return receiptPath(receiptOut, {
     kind: "koios.news.cloudflare-preview-receipt/v1",
     candidateManifestSha256: candidate.manifestDigest,
     binding: TARGET,
